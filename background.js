@@ -30,15 +30,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function startScraping(links) {
-    for (let i = 0; i < links.length; i++) {
-        // BREAK OUT OF LOOP IF USER HIT STOP
-        if (shouldStop) {
-            console.log("Scraping halted by user command.");
-            break;
-        }
+    const CONCURRENCY_LIMIT = 5;
+    let index = 0;
+    let activePromises = [];
+
+    async function processNext() {
+        if (shouldStop || index >= links.length) return;
+
+        const currentIndex = index++;
+        const link = links[currentIndex];
 
         try {
-            const link = links[i];
             const newTab = await chrome.tabs.create({ url: link, active: false });
             
             // Wait for page to load with an interruptible promise
@@ -72,8 +74,7 @@ async function startScraping(links) {
 
             if (shouldStop) {
                 await chrome.tabs.remove(newTab.id);
-                console.log("Scraping halted during page load.");
-                break;
+                return;
             }
 
             const results = await chrome.scripting.executeScript({
@@ -88,31 +89,40 @@ async function startScraping(links) {
             }
 
             await chrome.tabs.remove(newTab.id);
-            
             currentCount++;
             
-            if (shouldStop) {
-                console.log("Scraping halted after extracting data.");
-                break;
-            }
+            if (!shouldStop) {
+                // Wait before next link unless we are stopping, also interruptible
+                await new Promise(resolve => {
+                    let waitTime = 0;
+                    let waitInterval = setInterval(() => {
+                        waitTime += 500;
+                        if (shouldStop || waitTime >= 1000) {
+                            clearInterval(waitInterval);
+                            resolve();
+                        }
+                    }, 500);
+                });
 
-            // Wait before next link unless we are stopping, also interruptible
-            await new Promise(resolve => {
-                let waitTime = 0;
-                let waitInterval = setInterval(() => {
-                    waitTime += 500;
-                    if (shouldStop || waitTime >= 2000) {
-                        clearInterval(waitInterval);
-                        resolve();
-                    }
-                }, 500);
-            });
-            
+                // Recursively process next item
+                await processNext();
+            }
         } catch(e) {
-            console.error("Error scraping link", links[i], e);
-            currentCount++; 
+            console.error("Error scraping link", link, e);
+            currentCount++;
+            if (!shouldStop) {
+                await processNext();
+            }
         }
     }
+
+    // Start initial pool of workers
+    for (let i = 0; i < CONCURRENCY_LIMIT && i < links.length; i++) {
+        activePromises.push(processNext());
+    }
+
+    // Wait for all workers to finish
+    await Promise.all(activePromises);
     
     // When loop finishes (or is broken via Stop)
     isScraping = false;
