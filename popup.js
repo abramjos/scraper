@@ -113,17 +113,44 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-function extractMarketplaceLinks() {
-    const anchors = document.querySelectorAll('a[href*="/marketplace/item/"]');
+async function extractMarketplaceLinks() {
     const uniqueLinks = new Set();
+    let noNewLinksCount = 0;
     
-    anchors.forEach(a => {
-        try {
-            const url = new URL(a.href, window.location.origin);
-            url.search = '';
-            url.hash = '';
-            uniqueLinks.add(url.href);
-        } catch (e) { }
-    });
+    // Auto-scroll loop to grab up to 100 links
+    while (uniqueLinks.size < 100 && noNewLinksCount < 5) {
+        const anchors = document.querySelectorAll('a[href*="/marketplace/item/"]');
+        const initialSize = uniqueLinks.size;
+
+        anchors.forEach(a => {
+            try {
+                const url = new URL(a.href, window.location.origin);
+                url.search = '';
+                url.hash = '';
+                if (uniqueLinks.size < 100) {
+                    uniqueLinks.add(url.href);
+                }
+            } catch (e) { }
+        });
+
+        if (uniqueLinks.size === initialSize) {
+            noNewLinksCount++;
+        } else {
+            noNewLinksCount = 0;
+        }
+
+        if (uniqueLinks.size >= 100) {
+            break;
+        }
+
+        // Scroll down
+        window.scrollBy(0, window.innerHeight);
+        // Wait for potential new content to load
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
+    // Scroll back to top
+    window.scrollTo(0, 0);
+
     return Array.from(uniqueLinks);
 }
