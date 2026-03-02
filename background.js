@@ -21,6 +21,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } 
     else if (request.action === "stop_scrape") {
         shouldStop = true;
+        // If scraping is running, try to break early from wait states if needed
         sendResponse({ status: "stopped" });
     }
     else if (request.action === "get_status") {
@@ -40,21 +41,40 @@ async function startScraping(links) {
             const link = links[i];
             const newTab = await chrome.tabs.create({ url: link, active: false });
             
+            // Wait for page to load with an interruptible promise
+            let listener;
             await new Promise(resolve => {
+                let checkStopInterval = setInterval(() => {
+                    if (shouldStop) {
+                        clearInterval(checkStopInterval);
+                        clearTimeout(timeout);
+                        chrome.tabs.onUpdated.removeListener(listener);
+                        resolve();
+                    }
+                }, 500);
+
                 let timeout = setTimeout(() => {
+                    clearInterval(checkStopInterval);
                     chrome.tabs.onUpdated.removeListener(listener);
                     resolve(); 
                 }, 15000); 
                 
-                function listener(tabId, info) {
+                listener = function(tabId, info) {
                     if (tabId === newTab.id && info.status === 'complete') {
+                        clearInterval(checkStopInterval);
                         clearTimeout(timeout);
                         chrome.tabs.onUpdated.removeListener(listener);
-                        setTimeout(resolve, 1500); 
+                        setTimeout(() => { resolve(); }, 1500);
                     }
-                }
+                };
                 chrome.tabs.onUpdated.addListener(listener);
             });
+
+            if (shouldStop) {
+                await chrome.tabs.remove(newTab.id);
+                console.log("Scraping halted during page load.");
+                break;
+            }
 
             const results = await chrome.scripting.executeScript({
                 target: { tabId: newTab.id },
@@ -71,10 +91,22 @@ async function startScraping(links) {
             
             currentCount++;
             
-            // Wait before next link unless we are stopping
-            if (!shouldStop) {
-                await new Promise(r => setTimeout(r, 2000));
+            if (shouldStop) {
+                console.log("Scraping halted after extracting data.");
+                break;
             }
+
+            // Wait before next link unless we are stopping, also interruptible
+            await new Promise(resolve => {
+                let waitTime = 0;
+                let waitInterval = setInterval(() => {
+                    waitTime += 500;
+                    if (shouldStop || waitTime >= 2000) {
+                        clearInterval(waitInterval);
+                        resolve();
+                    }
+                }, 500);
+            });
             
         } catch(e) {
             console.error("Error scraping link", links[i], e);
@@ -153,6 +185,7 @@ function extractDataFromLivePage() {
             }
 
             if (description === "No Description Found") {
+                // Heuristic 1: Look for exact texts and traverse up
                 const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                 let sellerDescNode = null;
                 while(walker.nextNode()) {
@@ -164,20 +197,73 @@ function extractDataFromLivePage() {
                 }
 
                 if (sellerDescNode) {
+                    // Start from the text node's parent, go up a few levels to capture the sibling/child container
+                    // that actually holds the multi-line description text.
                     let container = sellerDescNode.parentElement;
-                    for(let i=0; i<4; i++) {
-                        if(container && container.parentElement) container = container.parentElement;
+                    for(let i=0; i<5; i++) {
+                        if(container && container.parentElement) {
+                            container = container.parentElement;
+                        }
                     }
                     if (container) {
                         let text = container.innerText || "";
+                        // Fallback logic for extraction: find the index of the header, take text after
+                        const headers = ["Seller's description", "Description", "About this item"];
+                        let foundHeader = "";
+                        for (let h of headers) {
+                            if (text.toLowerCase().includes(h.toLowerCase())) {
+                                foundHeader = h;
+                                break;
+                            }
+                        }
+
+                        if (foundHeader) {
+                            const headerRegex = new RegExp(`^.*?${foundHeader}`, 'is');
+                            text = text.replace(headerRegex, '');
+                        }
+
                         text = text.replace(/^(Seller's description|Description|About this item)\n?/i, '');
-                        text = text.replace(/\nSee less$/i, '');
-                        text = text.replace(/\nSee more$/i, '');
-                        text = text.replace(/\nReport$/i, '');
-                        if (text.trim().length > 5) {
-                            description = text.trim();
+                        text = text.replace(/\n?See less$/i, '');
+                        text = text.replace(/\n?See more$/i, '');
+                        text = text.replace(/\n?Report$/i, '');
+
+                        // Clean up leading/trailing empty lines
+                        text = text.trim();
+
+                        if (text.length > 5) {
+                            description = text;
                         }
                     }
+                }
+            }
+
+            // Heuristic 2: Many modern FB marketplace listings put the description in a specific div next to the title.
+            // Let's try to find spans or divs that have a large amount of text and no inner nested elements (or very few),
+            // and are not comments. This is a generic fallback.
+            if (description === "No Description Found" || description.length < 10) {
+                // Look for divs with multiple lines of text or spans
+                const allDivs = document.querySelectorAll('div[dir="auto"], span[dir="auto"]');
+                let bestDesc = "";
+                for (let el of allDivs) {
+                    const txt = el.innerText || "";
+                    if (txt.length > 30 && !txt.includes("Marketplace") && !txt.includes("Facebook") && !txt.includes("Message")) {
+                        // Ensure it's not the title or price container
+                        if (txt.includes(title) && txt.length < title.length + 50) continue;
+
+                        // Often description contains line breaks
+                        if (txt.length > bestDesc.length) {
+                            bestDesc = txt;
+                        }
+                    }
+                }
+                if (bestDesc) {
+                    // Try to clean up the best guess
+                    let text = bestDesc;
+                    text = text.replace(/^(Seller's description|Description|About this item)\n?/i, '');
+                    text = text.replace(/\n?See less$/i, '');
+                    text = text.replace(/\n?See more$/i, '');
+                    text = text.replace(/\n?Report$/i, '');
+                    description = text.trim();
                 }
             }
 
