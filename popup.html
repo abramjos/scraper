@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FB Marketplace Scraper</title>
+    <style>
+        body { width: 320px; font-family: 'Segoe UI', Tahoma, sans-serif; padding: 15px; color: #333; }
+        h3 { margin-top: 0; font-size: 16px; color: #1877f2; }
+        button {
+            width: 100%; padding: 12px; margin-bottom: 10px; background-color: #1877f2;
+            color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.2s;
+        }
+        button:hover { background-color: #166fe5; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        
+        #stopBtn { background-color: #e53e3e; display: none; }
+        #stopBtn:hover { background-color: #c53030; }
+        
+        #status { font-size: 13px; margin-top: 10px; padding: 10px; background-color: #f0f2f5; border-radius: 6px; min-height: 40px; }
+        .success { color: #008a00; font-weight: 500; }
+        .stopped { color: #e53e3e; font-weight: 500; }
+        
+        #progressContainer { display: none; margin-top: 15px; text-align: center; }
+        progress { width: 100%; height: 18px; border-radius: 4px; }
+        progress::-webkit-progress-bar { background-color: #e4e6eb; border-radius: 4px; }
+        progress::-webkit-progress-value { background-color: #42b72a; border-radius: 4px; }
+        #progressText { font-size: 12px; font-weight: bold; margin-top: 5px; color: #555; }
+    </style>
+</head>
+<body>
+    <h3>Marketplace Extractor Pro</h3>
+    <button id="startBtn">Start Scraping</button>
+    <button id="stopBtn">🛑 Stop Scraping</button>
+    
+    <div id="progressContainer">
+        <progress id="scrapeProgress" value="0" max="100"></progress>
+        <div id="progressText">0 / 0 items</div>
+    </div>
+
+    <div id="status">Ready to scan current tab.</div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

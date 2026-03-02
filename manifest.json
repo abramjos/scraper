@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "FB Marketplace Scraper Pro",
+  "version": "3.0",
+  "description": "Scrapes Facebook Marketplace items fully in the background.",
+  "permissions":[
+    "activeTab",
+    "tabs",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions":[
+    "*://*.facebook.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Scrape FB Marketplace"
+  }
+}
