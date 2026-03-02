@@ -61,7 +61,9 @@ document.addEventListener('DOMContentLoaded', () => {
         stopBtn.innerText = "Stopping (Please wait)...";
         chrome.runtime.sendMessage({ action: "stop_scrape" }, (response) => {
             if (response && response.status === "stopped") {
-                statusDiv.innerHTML = `<span class="stopped">🛑 Stopping after current item finishes...</span>`;
+                statusDiv.innerHTML = `<span class="stopped">🛑 Stopping immediately...</span>`;
+                // Manually trigger check status to resolve UI faster
+                setTimeout(checkStatus, 500);
             }
         });
     });
