@@ -5,32 +5,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressContainer = document.getElementById('progressContainer');
     const scrapeProgress = document.getElementById('scrapeProgress');
     const progressText = document.getElementById('progressText');
-    const limitInput = document.getElementById('limitInput');
 
     let pollInterval = null;
-
-    // Load saved origin from storage
-    chrome.storage.local.get(['scrapeLimit'], (res) => {
-        if (res.scrapeLimit) {
-            limitInput.value = res.scrapeLimit;
-        }
-    });
 
     // Check if scraping is already running when popup opens
     checkStatus();
 
     // -- START LOGIC --
     startBtn.addEventListener('click', async () => {
-        const originCity = originInput.value.trim();
-        const limitStr = limitInput.value.trim();
-        let limit = parseInt(limitStr, 10);
-        if (isNaN(limit) || limit < 1) limit = 100;
-
-        // Save params for next time
-        chrome.storage.local.set({ originCity, scrapeLimit: limit });
-
         startBtn.disabled = true;
-        statusDiv.innerText = "Scanning page for Marketplace links... (this may take time depending on your limit as it auto-scrolls)";
+        statusDiv.innerText = "Scanning page for Marketplace links...";
 
         try {
             const[activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -42,8 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const injectionResults = await chrome.scripting.executeScript({
                 target: { tabId: activeTab.id },
-                func: extractMarketplaceLinks,
-                args: [limit]
+                func: extractMarketplaceLinks
             });
 
             const links = injectionResults[0]?.result ||[];
@@ -141,13 +124,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function extractMarketplaceLinks(limit) {
-    if (!limit) limit = 100;
+async function extractMarketplaceLinks() {
     const uniqueLinks = new Set();
     let noNewLinksCount = 0;
     
-    // Auto-scroll loop to grab up to limit links
-    while (uniqueLinks.size < limit && noNewLinksCount < 5) {
+    // Auto-scroll loop to grab up to 100 links
+    while (uniqueLinks.size < 100 && noNewLinksCount < 5) {
         const anchors = document.querySelectorAll('a[href*="/marketplace/item/"]');
         const initialSize = uniqueLinks.size;
 
@@ -156,7 +138,7 @@ async function extractMarketplaceLinks(limit) {
                 const url = new URL(a.href, window.location.origin);
                 url.search = '';
                 url.hash = '';
-                if (uniqueLinks.size < limit) {
+                if (uniqueLinks.size < 100) {
                     uniqueLinks.add(url.href);
                 }
             } catch (e) { }
@@ -168,7 +150,7 @@ async function extractMarketplaceLinks(limit) {
             noNewLinksCount = 0;
         }
 
-        if (uniqueLinks.size >= limit) {
+        if (uniqueLinks.size >= 100) {
             break;
         }
 

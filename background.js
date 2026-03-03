@@ -48,7 +48,7 @@ async function startScraping(links, tabId) {
     let activePromises = [];
 
     async function processNext() {
-        if (shouldStop || index >= links.length) return;
+        if (session.shouldStop || index >= links.length) return;
 
         const currentIndex = index++;
         const link = links[currentIndex];
@@ -60,7 +60,7 @@ async function startScraping(links, tabId) {
             let listener;
             await new Promise(resolve => {
                 let checkStopInterval = setInterval(() => {
-                    if (shouldStop) {
+                    if (session.shouldStop) {
                         clearInterval(checkStopInterval);
                         clearTimeout(timeout);
                         chrome.tabs.onUpdated.removeListener(listener);
@@ -85,7 +85,7 @@ async function startScraping(links, tabId) {
                 chrome.tabs.onUpdated.addListener(listener);
             });
 
-            if (shouldStop) {
+            if (session.shouldStop) {
                 try { await chrome.tabs.remove(newTab.id); } catch(err) {}
                 return;
             }
@@ -115,13 +115,13 @@ async function startScraping(links, tabId) {
             try { await chrome.tabs.remove(newTab.id); } catch(err) {}
             session.currentCount++;
             
-            if (!shouldStop) {
+            if (!session.shouldStop) {
                 // Wait before next link unless we are stopping, also interruptible
                 await new Promise(resolve => {
                     let waitTime = 0;
                     let waitInterval = setInterval(() => {
                         waitTime += 500;
-                        if (shouldStop || waitTime >= 1000) {
+                        if (session.shouldStop || waitTime >= 1000) {
                             clearInterval(waitInterval);
                             resolve();
                         }
@@ -134,7 +134,7 @@ async function startScraping(links, tabId) {
         } catch(e) {
             console.error("Error scraping link", link, e);
             session.currentCount++;
-            if (!shouldStop) {
+            if (!session.shouldStop) {
                 await processNext();
             }
         }
@@ -313,45 +313,7 @@ function extractDataFromLivePage() {
 
             if (title.includes(" | Facebook")) title = title.split(" | Facebook")[0];
 
-            // Extract "Listed X days ago in Y"
-            let listedTime = "Unknown";
-            let location = "Unknown";
-
-            const allSpans = document.querySelectorAll('span, div');
-            for (let el of allSpans) {
-                const txt = el.innerText || "";
-                if (txt.includes("Listed") && txt.includes("ago in")) {
-                    // Typical string: "Listed 6 days ago in Sacramento, CA"
-                    const match = txt.match(/Listed (.*?) ago in (.*)/i);
-                    if (match && match.length >= 3) {
-                        listedTime = match[1].trim() + " ago";
-                        location = match[2].trim();
-                        break;
-                    }
-                } else if (txt.includes("Listed") && txt.includes("ago")) {
-                    // Typical string: "Listed 6 days ago"
-                    const match = txt.match(/Listed (.*?) ago/i);
-                    if (match && match.length >= 2) {
-                        listedTime = match[1].trim() + " ago";
-                        break; // Keep looking for location separately? This is a fallback
-                    }
-                }
-            }
-
-            // Fallback for location if not found in the "Listed..." string
-            if (location === "Unknown") {
-                for (let el of allSpans) {
-                    const txt = el.innerText || "";
-                    // Sometimes location is just a city, state format in a distinct span. We can try to look for comma formats.
-                    // This is risky, but FB often puts the location right under the title/price.
-                    if (txt.match(/^[A-Z][a-zA-Z\s]+,\s[A-Z]{2}$/)) {
-                        location = txt;
-                        break;
-                    }
-                }
-            }
-
-            resolve({ productName: title, price: price, description: description, listedTime: listedTime, location: location });
+            resolve({ productName: title, price: price, description: description });
         }, 2500); 
     });
 }

@@ -7,8 +7,7 @@
     "activeTab",
     "tabs",
     "scripting",
-    "downloads",
-    "storage"
+    "downloads"
   ],
   "host_permissions":[
     "*://*.facebook.com/*"
