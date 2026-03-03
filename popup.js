@@ -5,16 +5,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressContainer = document.getElementById('progressContainer');
     const scrapeProgress = document.getElementById('scrapeProgress');
     const progressText = document.getElementById('progressText');
+    const originInput = document.getElementById('originInput');
+    const limitInput = document.getElementById('limitInput');
 
     let pollInterval = null;
+
+    // Load saved origin from storage
+    chrome.storage.local.get(['originCity', 'scrapeLimit'], (res) => {
+        if (res.originCity) {
+            originInput.value = res.originCity;
+        }
+        if (res.scrapeLimit) {
+            limitInput.value = res.scrapeLimit;
+        }
+    });
 
     // Check if scraping is already running when popup opens
     checkStatus();
 
     // -- START LOGIC --
     startBtn.addEventListener('click', async () => {
+        const originCity = originInput.value.trim();
+        const limitStr = limitInput.value.trim();
+        let limit = parseInt(limitStr, 10);
+        if (isNaN(limit) || limit < 1) limit = 100;
+
+        // Save params for next time
+        chrome.storage.local.set({ originCity, scrapeLimit: limit });
+
         startBtn.disabled = true;
-        statusDiv.innerText = "Scanning page for Marketplace links...";
+        statusDiv.innerText = "Scanning page for Marketplace links... (this may take time depending on your limit as it auto-scrolls)";
 
         try {
             const[activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -26,7 +46,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const injectionResults = await chrome.scripting.executeScript({
                 target: { tabId: activeTab.id },
-                func: extractMarketplaceLinks
+                func: extractMarketplaceLinks,
+                args: [limit]
             });
 
             const links = injectionResults[0]?.result ||[];
@@ -37,15 +58,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Send URLs to the background worker
-            chrome.runtime.sendMessage({ action: "start_scrape", links: links }, (response) => {
+            // Send URLs and Tab ID to the background worker
+            chrome.runtime.sendMessage({ action: "start_scrape", links: links, originCity: originCity, sourceTabId: activeTab.id }, (response) => {
                 if (response && response.status === "started") {
                     statusDiv.innerHTML = `<span class="success">✅ Found ${links.length} items.</span><br><br><b>Scraping has started!</b><br>You can safely close this popup or browse other tabs.`;
                     startBtn.style.display = "none";
                     stopBtn.style.display = "block";
-                    startPolling();
+                    startPolling(activeTab.id);
                 } else if (response && response.status === "already_running") {
-                    statusDiv.innerText = "A scrape is already in progress!";
+                    statusDiv.innerText = "This tab is already scraping!";
+                    startBtn.style.display = "none";
+                    stopBtn.style.display = "block";
+                    startPolling(activeTab.id);
                 }
             });
 
@@ -56,25 +80,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // -- STOP LOGIC --
-    stopBtn.addEventListener('click', () => {
+    stopBtn.addEventListener('click', async () => {
         stopBtn.disabled = true;
         stopBtn.innerText = "Stopping (Please wait)...";
-        chrome.runtime.sendMessage({ action: "stop_scrape" }, (response) => {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+        chrome.runtime.sendMessage({ action: "stop_scrape", sourceTabId: activeTab?.id }, (response) => {
             if (response && response.status === "stopped") {
                 statusDiv.innerHTML = `<span class="stopped">🛑 Stopping immediately...</span>`;
-                // Manually trigger check status to resolve UI faster
-                setTimeout(checkStatus, 500);
+                setTimeout(() => checkStatus(activeTab?.id), 500);
             }
         });
     });
 
-    function startPolling() {
+    function startPolling(tabId) {
         if (pollInterval) clearInterval(pollInterval);
-        pollInterval = setInterval(checkStatus, 1000);
+        pollInterval = setInterval(() => checkStatus(tabId), 1000);
     }
 
-    function checkStatus() {
-        chrome.runtime.sendMessage({ action: "get_status" }, (response) => {
+    async function checkStatus(tabId) {
+        if (!tabId) {
+            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tabs.length) tabId = tabs[0].id;
+        }
+
+        chrome.runtime.sendMessage({ action: "get_status", sourceTabId: tabId }, (response) => {
             if (response && response.isScraping) {
                 startBtn.style.display = "none";
                 stopBtn.style.display = "block";
@@ -84,11 +114,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 scrapeProgress.value = response.count;
                 progressText.innerText = `${response.count} / ${response.total} items scraped`;
                 
-                if (statusDiv.innerText === "Ready to scan current tab.") {
+                if (statusDiv.innerText.includes("Ready to scan")) {
                     statusDiv.innerHTML = `<span class="success">Scraping is actively running!</span><br><br><b>You can close this popup.</b> The JSON will auto-save.`;
                 }
 
-                if (!pollInterval) startPolling();
+                if (!pollInterval) startPolling(tabId);
             } else {
                 // Scraping is finished or was stopped
                 if (pollInterval) {
@@ -98,8 +128,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     
                     if (response && response.wasStopped) {
                         statusDiv.innerHTML = `<span class="stopped">🛑 Scrape stopped early.</span><br>Partial data auto-saved to Downloads folder.`;
-                    } else {
+                    } else if (response && response.total > 0) {
                         statusDiv.innerHTML = `<span class="success">✅ Scraping Complete!</span><br>File auto-saved to your Downloads folder.`;
+                    } else {
+                        statusDiv.innerHTML = "Ready to scan current tab.";
                     }
                     
                     startBtn.style.display = "block";
@@ -113,12 +145,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function extractMarketplaceLinks() {
+async function extractMarketplaceLinks(limit) {
+    if (!limit) limit = 100;
     const uniqueLinks = new Set();
     let noNewLinksCount = 0;
     
-    // Auto-scroll loop to grab up to 100 links
-    while (uniqueLinks.size < 100 && noNewLinksCount < 5) {
+    // Auto-scroll loop to grab up to limit links
+    while (uniqueLinks.size < limit && noNewLinksCount < 5) {
         const anchors = document.querySelectorAll('a[href*="/marketplace/item/"]');
         const initialSize = uniqueLinks.size;
 
@@ -127,7 +160,7 @@ async function extractMarketplaceLinks() {
                 const url = new URL(a.href, window.location.origin);
                 url.search = '';
                 url.hash = '';
-                if (uniqueLinks.size < 100) {
+                if (uniqueLinks.size < limit) {
                     uniqueLinks.add(url.href);
                 }
             } catch (e) { }
@@ -139,7 +172,7 @@ async function extractMarketplaceLinks() {
             noNewLinksCount = 0;
         }
 
-        if (uniqueLinks.size >= 100) {
+        if (uniqueLinks.size >= limit) {
             break;
         }
 

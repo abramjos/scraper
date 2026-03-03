@@ -1,38 +1,106 @@
-let isScraping = false;
-let shouldStop = false;
-let scrapedData =[];
-let totalLinks = 0;
-let currentCount = 0;
+let scrapeSessions = {};
+
+// Cache for Nominatim and OSRM
+const coordinatesCache = {};
+const distanceCache = {};
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    const tabId = request.sourceTabId || sender?.tab?.id || 'unknown';
+
     if (request.action === "start_scrape") {
-        if (isScraping) {
+        if (scrapeSessions[tabId] && scrapeSessions[tabId].isScraping) {
             sendResponse({ status: "already_running" });
             return;
         }
-        isScraping = true;
-        shouldStop = false;
-        scrapedData =[];
-        totalLinks = request.links.length;
-        currentCount = 0;
         
-        startScraping(request.links);
+        scrapeSessions[tabId] = {
+            isScraping: true,
+            shouldStop: false,
+            scrapedData: [],
+            totalLinks: request.links.length,
+            currentCount: 0,
+            originCity: request.originCity || null
+        };
+
+        startScraping(request.links, tabId);
         sendResponse({ status: "started" });
     } 
     else if (request.action === "stop_scrape") {
-        shouldStop = true;
-        // If scraping is running, try to break early from wait states if needed
+        if (scrapeSessions[tabId]) {
+            scrapeSessions[tabId].shouldStop = true;
+        }
         sendResponse({ status: "stopped" });
     }
     else if (request.action === "get_status") {
-        sendResponse({ isScraping, count: currentCount, total: totalLinks, wasStopped: shouldStop });
+        const session = scrapeSessions[tabId];
+        if (session) {
+            sendResponse({
+                isScraping: session.isScraping,
+                count: session.currentCount,
+                total: session.totalLinks,
+                wasStopped: session.shouldStop
+            });
+        } else {
+            sendResponse({ isScraping: false });
+        }
     }
 });
 
-async function startScraping(links) {
+async function getCoordinates(cityString) {
+    if (!cityString) return null;
+    if (coordinatesCache[cityString]) return coordinatesCache[cityString];
+
+    try {
+        const query = encodeURIComponent(cityString);
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`;
+        const response = await fetch(url, { headers: { 'User-Agent': 'FBMarketplaceScraperExtension' }});
+        const data = await response.json();
+
+        if (data && data.length > 0) {
+            const coords = { lat: data[0].lat, lon: data[0].lon };
+            coordinatesCache[cityString] = coords;
+            return coords;
+        }
+    } catch(e) {
+        console.error("Nominatim error", e);
+    }
+    return null;
+}
+
+async function getDrivingDistanceMiles(originCoords, destCoords) {
+    const cacheKey = `${originCoords.lat},${originCoords.lon}-${destCoords.lat},${destCoords.lon}`;
+    if (distanceCache[cacheKey]) return distanceCache[cacheKey];
+
+    try {
+        // OSRM requires lon,lat format
+        const url = `https://router.project-osrm.org/route/v1/driving/${originCoords.lon},${originCoords.lat};${destCoords.lon},${destCoords.lat}?overview=false`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data && data.routes && data.routes.length > 0) {
+            // Distance is in meters
+            const meters = data.routes[0].distance;
+            const miles = (meters * 0.000621371).toFixed(1);
+            distanceCache[cacheKey] = miles;
+            return miles;
+        }
+    } catch(e) {
+        console.error("OSRM error", e);
+    }
+    return "Unknown";
+}
+
+
+async function startScraping(links, tabId) {
+    const session = scrapeSessions[tabId];
     const CONCURRENCY_LIMIT = 5;
     let index = 0;
     let activePromises = [];
+
+    let originCoords = null;
+    if (session.originCity) {
+        originCoords = await getCoordinates(session.originCity);
+    }
 
     async function processNext() {
         if (shouldStop || index >= links.length) return;
@@ -85,11 +153,24 @@ async function startScraping(links) {
             if (results && results[0] && results[0].result) {
                 const data = results[0].result;
                 data.listingUrl = link;
-                scrapedData.push(data);
+
+                // Calculate distance if origin exists and a location was found
+                if (originCoords && data.location && data.location !== "Unknown") {
+                    const destCoords = await getCoordinates(data.location);
+                    if (destCoords) {
+                        data.distanceMiles = await getDrivingDistanceMiles(originCoords, destCoords);
+                    } else {
+                        data.distanceMiles = "Unknown Location";
+                    }
+                } else if (originCoords) {
+                    data.distanceMiles = "Location missing from listing";
+                }
+
+                session.scrapedData.push(data);
             }
 
             await chrome.tabs.remove(newTab.id);
-            currentCount++;
+            session.currentCount++;
             
             if (!shouldStop) {
                 // Wait before next link unless we are stopping, also interruptible
@@ -109,7 +190,7 @@ async function startScraping(links) {
             }
         } catch(e) {
             console.error("Error scraping link", link, e);
-            currentCount++;
+            session.currentCount++;
             if (!shouldStop) {
                 await processNext();
             }
@@ -125,14 +206,19 @@ async function startScraping(links) {
     await Promise.all(activePromises);
     
     // When loop finishes (or is broken via Stop)
-    isScraping = false;
-    downloadData();
+    session.isScraping = false;
+    downloadData(session.scrapedData);
+
+    // Cleanup session to free memory
+    setTimeout(() => {
+        delete scrapeSessions[tabId];
+    }, 5000);
 }
 
-function downloadData() {
-    if (scrapedData.length === 0) return;
+function downloadData(dataArray) {
+    if (!dataArray || dataArray.length === 0) return;
     
-    const jsonString = JSON.stringify(scrapedData, null, 2);
+    const jsonString = JSON.stringify(dataArray, null, 2);
     const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(jsonString);
     
     chrome.downloads.download({
@@ -284,7 +370,45 @@ function extractDataFromLivePage() {
 
             if (title.includes(" | Facebook")) title = title.split(" | Facebook")[0];
 
-            resolve({ productName: title, price: price, description: description });
+            // Extract "Listed X days ago in Y"
+            let listedTime = "Unknown";
+            let location = "Unknown";
+
+            const allSpans = document.querySelectorAll('span, div');
+            for (let el of allSpans) {
+                const txt = el.innerText || "";
+                if (txt.includes("Listed") && txt.includes("ago in")) {
+                    // Typical string: "Listed 6 days ago in Sacramento, CA"
+                    const match = txt.match(/Listed (.*?) ago in (.*)/i);
+                    if (match && match.length >= 3) {
+                        listedTime = match[1].trim() + " ago";
+                        location = match[2].trim();
+                        break;
+                    }
+                } else if (txt.includes("Listed") && txt.includes("ago")) {
+                    // Typical string: "Listed 6 days ago"
+                    const match = txt.match(/Listed (.*?) ago/i);
+                    if (match && match.length >= 2) {
+                        listedTime = match[1].trim() + " ago";
+                        break; // Keep looking for location separately? This is a fallback
+                    }
+                }
+            }
+
+            // Fallback for location if not found in the "Listed..." string
+            if (location === "Unknown") {
+                for (let el of allSpans) {
+                    const txt = el.innerText || "";
+                    // Sometimes location is just a city, state format in a distinct span. We can try to look for comma formats.
+                    // This is risky, but FB often puts the location right under the title/price.
+                    if (txt.match(/^[A-Z][a-zA-Z\s]+,\s[A-Z]{2}$/)) {
+                        location = txt;
+                        break;
+                    }
+                }
+            }
+
+            resolve({ productName: title, price: price, description: description, listedTime: listedTime, location: location });
         }, 2500); 
     });
 }
