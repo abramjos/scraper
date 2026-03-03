@@ -14,7 +14,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             shouldStop: false,
             scrapedData: [],
             totalLinks: request.links.length,
-            currentCount: 0
+            currentCount: 0,
+            concurrency: request.concurrency || 10
         };
 
         startScraping(request.links, tabId);
@@ -43,7 +44,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function startScraping(links, tabId) {
     const session = scrapeSessions[tabId];
-    const CONCURRENCY_LIMIT = 5;
+    const CONCURRENCY_LIMIT = session.concurrency;
     let index = 0;
     let activePromises = [];
 

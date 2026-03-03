@@ -5,16 +5,41 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressContainer = document.getElementById('progressContainer');
     const scrapeProgress = document.getElementById('scrapeProgress');
     const progressText = document.getElementById('progressText');
+    const limitInput = document.getElementById('limitInput');
+    const concurrencyInput = document.getElementById('concurrencyInput');
+    const concurrencyVal = document.getElementById('concurrencyVal');
 
     let pollInterval = null;
+
+    // Load saved settings
+    chrome.storage.local.get(['scrapeLimit', 'concurrencyLimit'], (res) => {
+        if (res.scrapeLimit) limitInput.value = res.scrapeLimit;
+        if (res.concurrencyLimit) {
+            concurrencyInput.value = res.concurrencyLimit;
+            concurrencyVal.innerText = res.concurrencyLimit;
+        }
+    });
+
+    concurrencyInput.addEventListener('input', (e) => {
+        concurrencyVal.innerText = e.target.value;
+    });
 
     // Check if scraping is already running when popup opens
     checkStatus();
 
     // -- START LOGIC --
     startBtn.addEventListener('click', async () => {
+        let limit = parseInt(limitInput.value.trim(), 10);
+        if (isNaN(limit) || limit < 1) limit = 100;
+
+        let concurrency = parseInt(concurrencyInput.value.trim(), 10);
+        if (isNaN(concurrency) || concurrency < 1) concurrency = 10;
+
+        // Save settings for next time
+        chrome.storage.local.set({ scrapeLimit: limit, concurrencyLimit: concurrency });
+
         startBtn.disabled = true;
-        statusDiv.innerText = "Scanning page for Marketplace links...";
+        statusDiv.innerText = "Scanning page for Marketplace links... (this may take time depending on your limit as it auto-scrolls)";
 
         try {
             const[activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -26,7 +51,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const injectionResults = await chrome.scripting.executeScript({
                 target: { tabId: activeTab.id },
-                func: extractMarketplaceLinks
+                func: extractMarketplaceLinks,
+                args: [limit]
             });
 
             const links = injectionResults[0]?.result ||[];
@@ -38,7 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Send URLs and Tab ID to the background worker
-            chrome.runtime.sendMessage({ action: "start_scrape", links: links, sourceTabId: activeTab.id }, (response) => {
+            chrome.runtime.sendMessage({ action: "start_scrape", links: links, concurrency: concurrency, sourceTabId: activeTab.id }, (response) => {
                 if (response && response.status === "started") {
                     statusDiv.innerHTML = `<span class="success">✅ Found ${links.length} items.</span><br><br><b>Scraping has started!</b><br>You can safely close this popup or browse other tabs.`;
                     startBtn.style.display = "none";
@@ -124,12 +150,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function extractMarketplaceLinks() {
+async function extractMarketplaceLinks(limit) {
+    if (!limit) limit = 100;
     const uniqueLinks = new Set();
     let noNewLinksCount = 0;
     
-    // Auto-scroll loop to grab up to 100 links
-    while (uniqueLinks.size < 100 && noNewLinksCount < 5) {
+    // Auto-scroll loop to grab up to limit links
+    while (uniqueLinks.size < limit && noNewLinksCount < 5) {
         const anchors = document.querySelectorAll('a[href*="/marketplace/item/"]');
         const initialSize = uniqueLinks.size;
 
@@ -138,7 +165,7 @@ async function extractMarketplaceLinks() {
                 const url = new URL(a.href, window.location.origin);
                 url.search = '';
                 url.hash = '';
-                if (uniqueLinks.size < 100) {
+                if (uniqueLinks.size < limit) {
                     uniqueLinks.add(url.href);
                 }
             } catch (e) { }
@@ -150,7 +177,7 @@ async function extractMarketplaceLinks() {
             noNewLinksCount = 0;
         }
 
-        if (uniqueLinks.size >= 100) {
+        if (uniqueLinks.size >= limit) {
             break;
         }
 
