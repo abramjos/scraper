@@ -1,9 +1,5 @@
 let scrapeSessions = {};
 
-// Cache for Nominatim and OSRM
-const coordinatesCache = {};
-const distanceCache = {};
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const tabId = request.sourceTabId || sender?.tab?.id || 'unknown';
 
@@ -46,76 +42,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-async function getCoordinates(cityString) {
-    if (!cityString) return null;
-    if (coordinatesCache[cityString]) return coordinatesCache[cityString];
-
-    try {
-        const query = encodeURIComponent(cityString);
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`;
-        const response = await fetch(url, { headers: { 'User-Agent': 'FBMarketplaceScraperExtension' }});
-        const data = await response.json();
-
-        if (data && data.length > 0) {
-            const coords = { lat: data[0].lat, lon: data[0].lon };
-            coordinatesCache[cityString] = coords;
-            return coords;
-        }
-    } catch(e) {
-        console.error("Nominatim error", e);
-    }
-    return null;
-}
-
-async function getDrivingDistanceMiles(originCoords, destCoords) {
-    const cacheKey = `${originCoords.lat},${originCoords.lon}-${destCoords.lat},${destCoords.lon}`;
-    if (distanceCache[cacheKey]) return distanceCache[cacheKey];
-
-    try {
-        // OSRM requires lon,lat format
-        const url = `https://router.project-osrm.org/route/v1/driving/${originCoords.lon},${originCoords.lat};${destCoords.lon},${destCoords.lat}?overview=false`;
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data && data.routes && data.routes.length > 0) {
-            // Distance is in meters
-            const meters = data.routes[0].distance;
-            const miles = (meters * 0.000621371).toFixed(1);
-            distanceCache[cacheKey] = miles;
-            return miles;
-        }
-    } catch(e) {
-        console.error("OSRM error", e);
-    }
-    return "Unknown";
-}
-
-
 async function startScraping(links, tabId) {
     const session = scrapeSessions[tabId];
     const CONCURRENCY_LIMIT = 5;
     let index = 0;
     let activePromises = [];
 
-    let originCoords = null;
-    if (session.originCity) {
-        originCoords = await getCoordinates(session.originCity);
-    }
-
     async function processNext() {
-        if (shouldStop || index >= links.length) return;
+        if (session.shouldStop || index >= links.length) return;
 
         const currentIndex = index++;
         const link = links[currentIndex];
+        let newTabId = null;
 
         try {
             const newTab = await chrome.tabs.create({ url: link, active: false });
+            newTabId = newTab.id;
             
             // Wait for page to load with an interruptible promise
             let listener;
             await new Promise(resolve => {
                 let checkStopInterval = setInterval(() => {
-                    if (shouldStop) {
+                    if (session.shouldStop) {
                         clearInterval(checkStopInterval);
                         clearTimeout(timeout);
                         chrome.tabs.onUpdated.removeListener(listener);
@@ -130,7 +78,7 @@ async function startScraping(links, tabId) {
                 }, 15000); 
                 
                 listener = function(tabId, info) {
-                    if (tabId === newTab.id && info.status === 'complete') {
+                    if (tabId === newTabId && info.status === 'complete') {
                         clearInterval(checkStopInterval);
                         clearTimeout(timeout);
                         chrome.tabs.onUpdated.removeListener(listener);
@@ -140,45 +88,46 @@ async function startScraping(links, tabId) {
                 chrome.tabs.onUpdated.addListener(listener);
             });
 
-            if (shouldStop) {
-                await chrome.tabs.remove(newTab.id);
+            if (session.shouldStop) {
+                if (newTabId) await chrome.tabs.remove(newTabId).catch(() => {});
+                return;
+            }
+
+            // Check if tab still exists
+            const tabExists = await chrome.tabs.get(newTabId).catch(() => null);
+            if (!tabExists) {
+                console.warn(`Tab ${newTabId} was closed prematurely.`);
+                session.currentCount++;
+                if (!session.shouldStop) {
+                    await processNext();
+                }
                 return;
             }
 
             const results = await chrome.scripting.executeScript({
-                target: { tabId: newTab.id },
+                target: { tabId: newTabId },
                 func: extractDataFromLivePage
+            }).catch(e => {
+                console.error(`Script execution failed on tab ${newTabId}:`, e);
+                return null;
             });
 
             if (results && results[0] && results[0].result) {
                 const data = results[0].result;
                 data.listingUrl = link;
-
-                // Calculate distance if origin exists and a location was found
-                if (originCoords && data.location && data.location !== "Unknown") {
-                    const destCoords = await getCoordinates(data.location);
-                    if (destCoords) {
-                        data.distanceMiles = await getDrivingDistanceMiles(originCoords, destCoords);
-                    } else {
-                        data.distanceMiles = "Unknown Location";
-                    }
-                } else if (originCoords) {
-                    data.distanceMiles = "Location missing from listing";
-                }
-
                 session.scrapedData.push(data);
             }
 
-            await chrome.tabs.remove(newTab.id);
+            if (newTabId) await chrome.tabs.remove(newTabId).catch(() => {});
             session.currentCount++;
             
-            if (!shouldStop) {
+            if (!session.shouldStop) {
                 // Wait before next link unless we are stopping, also interruptible
                 await new Promise(resolve => {
                     let waitTime = 0;
                     let waitInterval = setInterval(() => {
                         waitTime += 500;
-                        if (shouldStop || waitTime >= 1000) {
+                        if (session.shouldStop || waitTime >= 1000) {
                             clearInterval(waitInterval);
                             resolve();
                         }
@@ -190,8 +139,9 @@ async function startScraping(links, tabId) {
             }
         } catch(e) {
             console.error("Error scraping link", link, e);
+            if (newTabId) await chrome.tabs.remove(newTabId).catch(() => {});
             session.currentCount++;
-            if (!shouldStop) {
+            if (!session.shouldStop) {
                 await processNext();
             }
         }
