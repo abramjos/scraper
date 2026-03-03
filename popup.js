@@ -5,16 +5,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressContainer = document.getElementById('progressContainer');
     const scrapeProgress = document.getElementById('scrapeProgress');
     const progressText = document.getElementById('progressText');
-    const originInput = document.getElementById('originInput');
     const limitInput = document.getElementById('limitInput');
 
     let pollInterval = null;
 
     // Load saved origin from storage
-    chrome.storage.local.get(['originCity', 'scrapeLimit'], (res) => {
-        if (res.originCity) {
-            originInput.value = res.originCity;
-        }
+    chrome.storage.local.get(['scrapeLimit'], (res) => {
         if (res.scrapeLimit) {
             limitInput.value = res.scrapeLimit;
         }
@@ -59,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Send URLs and Tab ID to the background worker
-            chrome.runtime.sendMessage({ action: "start_scrape", links: links, originCity: originCity, sourceTabId: activeTab.id }, (response) => {
+            chrome.runtime.sendMessage({ action: "start_scrape", links: links, sourceTabId: activeTab.id }, (response) => {
                 if (response && response.status === "started") {
                     statusDiv.innerHTML = `<span class="success">✅ Found ${links.length} items.</span><br><br><b>Scraping has started!</b><br>You can safely close this popup or browse other tabs.`;
                     startBtn.style.display = "none";

@@ -1,9 +1,5 @@
 let scrapeSessions = {};
 
-// Cache for Nominatim and OSRM
-const coordinatesCache = {};
-const distanceCache = {};
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const tabId = request.sourceTabId || sender?.tab?.id || 'unknown';
 
@@ -18,8 +14,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             shouldStop: false,
             scrapedData: [],
             totalLinks: request.links.length,
-            currentCount: 0,
-            originCity: request.originCity || null
+            currentCount: 0
         };
 
         startScraping(request.links, tabId);
@@ -46,61 +41,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-async function getCoordinates(cityString) {
-    if (!cityString) return null;
-    if (coordinatesCache[cityString]) return coordinatesCache[cityString];
-
-    try {
-        const query = encodeURIComponent(cityString);
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`;
-        const response = await fetch(url, { headers: { 'User-Agent': 'FBMarketplaceScraperExtension' }});
-        const data = await response.json();
-
-        if (data && data.length > 0) {
-            const coords = { lat: data[0].lat, lon: data[0].lon };
-            coordinatesCache[cityString] = coords;
-            return coords;
-        }
-    } catch(e) {
-        console.error("Nominatim error", e);
-    }
-    return null;
-}
-
-async function getDrivingDistanceMiles(originCoords, destCoords) {
-    const cacheKey = `${originCoords.lat},${originCoords.lon}-${destCoords.lat},${destCoords.lon}`;
-    if (distanceCache[cacheKey]) return distanceCache[cacheKey];
-
-    try {
-        // OSRM requires lon,lat format
-        const url = `https://router.project-osrm.org/route/v1/driving/${originCoords.lon},${originCoords.lat};${destCoords.lon},${destCoords.lat}?overview=false`;
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data && data.routes && data.routes.length > 0) {
-            // Distance is in meters
-            const meters = data.routes[0].distance;
-            const miles = (meters * 0.000621371).toFixed(1);
-            distanceCache[cacheKey] = miles;
-            return miles;
-        }
-    } catch(e) {
-        console.error("OSRM error", e);
-    }
-    return "Unknown";
-}
-
-
 async function startScraping(links, tabId) {
     const session = scrapeSessions[tabId];
     const CONCURRENCY_LIMIT = 5;
     let index = 0;
     let activePromises = [];
-
-    let originCoords = null;
-    if (session.originCity) {
-        originCoords = await getCoordinates(session.originCity);
-    }
 
     async function processNext() {
         if (shouldStop || index >= links.length) return;
@@ -141,35 +86,33 @@ async function startScraping(links, tabId) {
             });
 
             if (shouldStop) {
-                await chrome.tabs.remove(newTab.id);
+                try { await chrome.tabs.remove(newTab.id); } catch(err) {}
                 return;
             }
 
-            const results = await chrome.scripting.executeScript({
-                target: { tabId: newTab.id },
-                func: extractDataFromLivePage
-            });
-
-            if (results && results[0] && results[0].result) {
-                const data = results[0].result;
-                data.listingUrl = link;
-
-                // Calculate distance if origin exists and a location was found
-                if (originCoords && data.location && data.location !== "Unknown") {
-                    const destCoords = await getCoordinates(data.location);
-                    if (destCoords) {
-                        data.distanceMiles = await getDrivingDistanceMiles(originCoords, destCoords);
-                    } else {
-                        data.distanceMiles = "Unknown Location";
-                    }
-                } else if (originCoords) {
-                    data.distanceMiles = "Location missing from listing";
-                }
-
-                session.scrapedData.push(data);
+            // Verify tab still exists before injecting
+            let tabExists = false;
+            try {
+                const existingTab = await chrome.tabs.get(newTab.id);
+                if (existingTab) tabExists = true;
+            } catch (err) {
+                tabExists = false;
             }
 
-            await chrome.tabs.remove(newTab.id);
+            if (tabExists) {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId: newTab.id },
+                    func: extractDataFromLivePage
+                });
+
+                if (results && results[0] && results[0].result) {
+                    const data = results[0].result;
+                    data.listingUrl = link;
+                    session.scrapedData.push(data);
+                }
+            }
+
+            try { await chrome.tabs.remove(newTab.id); } catch(err) {}
             session.currentCount++;
             
             if (!shouldStop) {
